@@ -1,5 +1,5 @@
 # Introduction:
-This document reports any generative AI usage for this project. All interactions are performed with Qwen3.6:35b. Cline is used as a code agent with a context window of 60k after developing the the full LoRa implementation in order to create lab exercises. Bellow documents the prompt used and all agent-user interactions.
+This document reports any generative AI usage for this project. All interactions are performed with Qwen3.6:35b. Cline is used as a code agent with a context window of 60k after developing the the full LoRa implementation in order to create lab exercises. Additional conversations outside of the agent are held via Ollama with the same model. Bellow documents the prompt used and all agent-user interactions.
 
 # Prompt
 
@@ -299,3 +299,98 @@ The notebook is at **`c:\Users\BrockRouser-US\Desktop\school\thesis-work\mae-573
 
 # USER NOTE: 
 Cline was successfully able to generate a notebook using the given constraints and notebook I had put together. However, due to the limited context window many of the working components of my original notebook became mangled. As such only parts 5 - 7 of the generated notebook are used as inspiration. These parts contain the lab exercise portions and I adjusted them to work with the LoRa implementation I came up with originally. Any sections developed in the final notebook that take inspiration from these generated parts is marked.
+
+# USER:
+can you adjust this to plot the cumulitve sum of the singular values to highlight how truncation works?
+
+np.random.seed(42)
+base_net = NeuralNet(n_features=2, hidden_dim=32, n_hidden=1)
+
+plt.figure(figsize=(10, 5))
+for i, layer in enumerate(base_net.layers):
+U, s, Vt = np.linalg.svd(layer.neuron.W)
+plt.semilogy(s, 'o-', label=f'Layer {i} (rank={layer.neuron.W.shape})', alpha=0.7)
+
+plt.xlabel('Singular Value Index'); plt.ylabel('Log Singular Value')
+plt.title('Intrinsic Rank of Pretrained Networks (Random Init)')
+plt.legend(); plt.grid(alpha=0.3); plt.tight_layout()
+plt.show()
+
+print("\nSingular values reveal the intrinsic complexity of each layer:")
+for i, layer in enumerate(base_net.layers):
+U, s, Vt = np.linalg.svd(layer.neuron.W)
+print(f" Layer {i}: top-5 singular values: {[f'{v:.2f}' for v in s[:5]]}")
+
+# OLLAMA:
+Here’s the adjusted version that plots the **normalized cumulative sum of singular values** to explicitly visualize how matrix energy accumulates and where truncation thresholds lie:
+
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Ensure we're working with 2D weight matrices
+for i, layer in enumerate(base_net.layers):
+    if len(layer.neuron.W.shape) != 2:
+        raise ValueError(f"Layer {i} weights must be 2D for SVD. Shape: {layer.neuron.W.shape}")
+
+plt.figure(figsize=(10, 5))
+
+for i, layer in enumerate(base_net.layers):
+    U, s, Vt = np.linalg.svd(layer.neuron.W, full_matrices=False)
+    
+    # Normalize cumulative sum to show proportion of total energy captured
+    s_cumsum = np.cumsum(s) / np.sum(s)
+    
+    plt.plot(range(1, len(s) + 1), s_cumsum, 'o-', 
+             label=f'Layer {i} (shape={layer.neuron.W.shape})', alpha=0.7)
+
+# Reference lines for standard truncation thresholds
+thresholds = [0.90, 0.95, 0.99]
+colors = ['red', 'orange', 'green']
+for thresh, color in zip(thresholds, colors):
+    plt.axhline(y=thresh, color=color, linestyle='--', linewidth=1.2, 
+                label=f'{int(thresh*100)}% energy threshold')
+
+plt.xlabel('Singular Value Index (Rank)')
+plt.ylabel('Cumulative Proportion of Energy Captured')
+plt.title('Intrinsic Rank & Truncation Behavior of Pretrained Networks')
+plt.ylim(0, 1.05)
+plt.grid(alpha=0.3)
+plt.legend(loc='lower right')
+plt.tight_layout()
+plt.show()
+
+# Print truncated rank analysis
+print("\n🔍 Truncation Threshold Analysis:")
+for i, layer in enumerate(base_net.layers):
+    _, s, _ = np.linalg.svd(layer.neuron.W, full_matrices=False)
+    s_cumsum = np.cumsum(s) / np.sum(s)
+    
+    # Find smallest rank where cumulative energy >= threshold
+    truncation_ranks = [np.searchsorted(s_cumsum, thresh) + 1 for thresh in thresholds]
+    
+    print(f"Layer {i} (shape={layer.neuron.W.shape}):")
+    print(f"  Top-5 singular values: {[f'{v:.2f}' for v in s[:5]]}")
+    print(f"  Singular values needed to capture {', '.join(f'{t*100:.0f}%' for t in thresholds)} energy: {truncation_ranks}")
+```
+
+### 🔑 Key Improvements & Why They Matter
+| Change | Purpose |
+|--------|---------|
+| **Normalized cumsum** (`/ np.sum(s)`) | Makes all layers comparable regardless of weight magnitude. Shows % of variance captured |
+| **Linear y-axis (0→1)** | Cumulative sums on log scale distort accumulation curves. Linear reveals the "elbow" clearly |
+| **Reference lines at 90%/95%/99%** | Standard engineering thresholds for truncation. Where a curve crosses these = effective rank |
+| **`full_matrices=False`** | Faster SVD for rectangular matrices; only computes non-zero singular values |
+| **Automated rank calculation** | `np.searchsorted` efficiently finds exact truncation dimensions per layer |
+
+### 📊 How to Interpret the Plot
+- **Steep rise → flat region**: Low intrinsic rank. Few components capture most information → aggressive truncation is safe.
+- **Gradual decline**: High effective rank. Many singular values contribute → truncation will lose significant information.
+- **Intersection with threshold lines**: The x-coordinate at 95% intersection = recommended truncation dimension for that layer (e.g., if Layer 2 hits 95% at `k=8`, keeping only top 8 components captures 95% of the layer's expressivity).
+
+### ⚠️ Usage Notes
+1. All layers must have the **same input dimension** for meaningful comparison on one plot. If dimensions differ, consider subplotting or normalizing by `min(shape)`.
+2. For **rectangular weight matrices**, SVD automatically returns `min(in_features, out_features)` singular values. The truncation rank can never exceed this limit.
+3. To actually truncate: `W_trunc = U[:, :k] * s[:k][None, :] @ Vt[:k, :]`
+
+Need this adapted for your specific architecture (Conv2D, Transformer, etc.) or wrapped in a reusable utility class? Just share your layer types.
